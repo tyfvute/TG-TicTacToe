@@ -1,7 +1,9 @@
 import logging
 from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from aiogram import Bot, Dispatcher, types
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.filters import Command
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 import re
 
@@ -11,11 +13,19 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # Указываем временную зону по умолчанию
-TZ = timezone('Asia/Yekaterinburg')
+TZ = timezone('Europe/Samara')
 
 # Регулярное выражение для проверки формата времени
 TIME_FORMAT_REGEX = re.compile(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
 
+# Инициализация бота и диспетчера
+API_TOKEN = 'Api_token'
+bot = Bot(token=API_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+# Инициализация планировщика
+scheduler = AsyncIOScheduler(timezone=TZ)
 
 # Функция для проверки формата времени
 def validate_time_format(time_str):
@@ -23,30 +33,44 @@ def validate_time_format(time_str):
         return True
     return False
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@dp.message(Command("start"))
+async def start(message: types.Message):
     """Обработчик команды /start"""
-    await update.message.reply_text(
+    await message.reply(
         'Привет! Я бот-напоминание. Чтобы добавить напоминание, используйте команду '
-        '/remind "текст напоминания" HH:MM\n\n'
+        '/remind "текст напоминания" HH:MM\n\n '
+        'а если хочешь узнать все команды введи команду /help'
     )
 
+    @dp.message(Command("help"))
+    async def help_command(message: types.Message):
+        """Обработчик команды /help"""
+        help_text = (
+            "Я бот-напоминание. Вот список моих команд:\n"
+            "/start - начать работу со мной.\n"
+            "/remind \"текст напоминания\" HH:MM - установить напоминание.\n"
+            "/list - показать список текущих напоминаний.\n"
+            "/cancel номер_напоминания - удалить конкретное напоминание.\n"
+            "/help - получить эту справку."
+        )
+        await message.reply(help_text)
 
-async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@dp.message(Command("remind"))
+async def remind(message: types.Message):
     """Обработчик команды /remind"""
-    chat_id = update.effective_chat.id
+    chat_id = message.chat.id
 
-    if len(context.args) < 2:
-        await update.message.reply_text("Не хватает аргументов. Используйте команду в формате: "
-                                        "/remind \"текст напоминания\" HH:MM")
+    args = message.text.split()[1:]
+    if len(args) < 2:
+        await message.reply("Не хватает аргументов. Используйте команду в формате: "
+                            "/remind \"текст напоминания\" HH:MM")
         return
 
-    args = context.args
     text = ' '.join(args[:-1])
     time_str = args[-1]
 
     if not validate_time_format(time_str):
-        await update.message.reply_text("Время указано неверно. Пожалуйста, используйте формат HH:MM.")
+        await message.reply("Время указано неверно. Пожалуйста, используйте формат HH:MM.")
         return
 
     try:
@@ -72,62 +96,93 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Время напоминания: {run_datetime}")
         logger.info(f"Временная метка для задачи: {run_datetime.timestamp()}")
 
-        # Добавляем задачу в очередь
+        # Добавляем задачу в планировщик
         try:
-            job = context.job_queue.run_once(send_reminder, run_datetime.timestamp(),
-                                             data={'chat_id': chat_id, 'text': text}, name=str(chat_id))
-            logger.info(f'Задача добавлена в очередь: {job.name} ({job.next_t})')
+            scheduler.add_job(
+                send_reminder,
+                trigger="date",
+                run_date=run_datetime,
+                args=(bot, chat_id, text),
+            )
+            logger.info(f'Задача добавлена в планировщик: {run_datetime.strftime("%Y-%m-%d %H:%M")}')
             logger.info(f'Установлено новое напоминание: {text} в {run_datetime.strftime("%Y-%m-%d %H:%M")}')
-            await update.message.reply_text(
+            await message.reply(
                 f'Напоминание установлено: {text} в {run_datetime.astimezone(TZ).strftime("%H:%M")}')
         except Exception as e:
             logger.error(f"Произошла ошибка при создании задачи: {e}")
-            await update.message.reply_text(f"Не удалось создать напоминание. Попробуйте позже.")
+            await message.reply("Не удалось создать напоминание. Попробуйте позже.")
 
     except ValueError as e:
         logger.error(f"Произошла ошибка при обработке данных: {e}")
-        await update.message.reply_text(f"Некорректные данные: {str(e)}. Попробуйте еще раз.")
+        await message.reply(f"Некорректные данные: {str(e)}. Попробуйте еще раз.")
 
+@dp.message(Command("list"))
+async def list_reminders(message: types.Message):
+    """Обработчик команды /list"""
+    chat_id = message.chat.id
 
-async def cancel_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    jobs = scheduler.get_jobs()
+    reminders = []
+
+    for i, job in enumerate(jobs):
+        if job.args[1] == chat_id:  # Проверяем, что задача принадлежит этому пользователю
+            run_date = job.next_run_time.astimezone(TZ)
+            text = job.args[2]
+            reminders.append(f"{i + 1}) {run_date.strftime('%Y-%m-%d %H:%M')}: {text}")
+
+    if reminders:
+        reply_text = "Вот ваши текущие напоминания:\n"
+        reply_text += "\n".join(reminders)
+    else:
+        reply_text = "У вас нет активных напоминаний."
+
+    await message.reply(reply_text)
+
+@dp.message(Command("cancel"))
+async def cancel_reminder(message: types.Message):
     """Обработчик команды /cancel"""
-    chat_id = update.effective_chat.id
-    jobs = context.job_queue.get_jobs_by_name(str(chat_id))
+    chat_id = message.chat.id
+    args = message.text.split()
 
-    if not jobs:
-        await update.message.reply_text("У вас нет активных напоминаний.")
-        return
+    if len(args) > 1:
+        index = args[1].strip()
+        if index.isdigit():
+            index = int(index)
+            removed = remove_reminder_by_index(scheduler, chat_id, index)
+            if removed:
+                await message.reply(f"Напоминание под номером {index} было успешно удалено.")
+            else:
+                await message.reply(f"Не удалось найти напоминание под номером {index}.")
+        else:
+            await message.reply("Номер напоминания должен быть числом.")
+    else:
+        await message.reply("Пожалуйста, укажите номер напоминания, которое хотите отменить.")
 
-    for job in jobs:
-        job.schedule_removal()
+def remove_reminder_by_index(scheduler, chat_id, index):
+    jobs = scheduler.get_jobs()
+    user_jobs = [job for job in jobs if job.args[1] == chat_id]
 
-    await update.message.reply_text("Все ваши напоминания были отменены.")
+    if index < 1 or index > len(user_jobs):
+        return False
 
+    job_to_remove = user_jobs[index - 1]
+    job_to_remove.remove()
+    return True
 
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
+async def send_reminder(bot: Bot, chat_id: int, text: str):
     """Функция отправки напоминания"""
-    job = context.job
     try:
-        await context.bot.send_message(chat_id=job.data['chat_id'], text=f'Напоминание: {job.data["text"]}')
+        await bot.send_message(chat_id=chat_id, text=f'Напоминание: {text}')
     except Exception as e:
         logger.error(f"Ошибка при отправке сообщения: {e}")
 
-
-def main():
-    app = ApplicationBuilder().token("Token_bot").build()
-
-    start_handler = CommandHandler('start', start)
-    remind_handler = CommandHandler('remind', remind)
-    cancel_handler = CommandHandler('cancel', cancel_reminder)
-
-    app.add_handler(start_handler)
-    app.add_handler(remind_handler)
-    app.add_handler(cancel_handler)
-
-    logger.info("Бот запущен...")
-    app.run_polling()
-
-
 if __name__ == '__main__':
-    main()
+    import asyncio
 
+    async def main():
+        # Запуск планировщика
+        scheduler.start()
+        # Запуск бота
+        await dp.start_polling(bot)
+
+    asyncio.run(main())
