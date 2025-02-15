@@ -49,5 +49,5 @@
 
 5. Запустите бота через терминал:
 
-       python bot.py
+       python your_bot.py
       
