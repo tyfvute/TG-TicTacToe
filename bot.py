@@ -127,7 +127,6 @@ def get_command_keyboard():
             [KeyboardButton(text="/start")],
             [KeyboardButton(text="/help")],
             [KeyboardButton(text="/list")],
-            [KeyboardButton(text="/cancel")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
