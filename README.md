@@ -1,6 +1,5 @@
-**⏳ TelegramReminderBot @ReminderBotVeryUsefull**
+**⏳ TelegramReminderBot [@ReminderBotVeryUsefull](https://web.telegram.org/k/#@ReminderBotVeryUsefull_bot)**
 =
-[ReminderBotVeryUsefull](https://web.telegram.org/k/#@ReminderBotVeryUsefull_bot)
 >Бот-напоминание для Telegram.
 >Этот бот предназначен для создания и управления напоминаниями через Telegram. Пользователи могут установить напоминания на определённое время, а затем получать уведомления в нужный момент.
 
