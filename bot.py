@@ -4,12 +4,14 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
+from aiogram import F
+from aiogram.filters import Command
 import re
 import sqlite3
 import asyncio
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 # Настройка логгирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -26,7 +28,7 @@ TIME_FORMAT_REGEX = re.compile(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$')
 DATETIME_FORMAT_REGEX = re.compile(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$')
 
 # Инициализация бота и диспетчера
-API_TOKEN = 'Api_token'  # Замените на ваш токен
+API_TOKEN = '7696152863:AAG0TnyN9RfZUb5MZmO-zmqBOR6YOPMRYGk'  # Замените на ваш токен
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -79,11 +81,11 @@ def remove_old_reminders(chat_id, run_datetime_str):
     """Удаление устаревших напоминаний из базы данных"""
     conn = sqlite3.connect('reminders.db')
     c = conn.cursor()
-    c.execute("DELETE FROM reminders WHERE chat_id=? AND run_datetime=?", (chat_id, run_datetime_str))
+    c.execute("DELETE FROM reminders WHERE chat_id=? AND run_datetime <= ?", (chat_id, run_datetime_str))
     conn.commit()
     conn.close()
+    logger.info(f"Удалены устаревшие напоминания для chat_id={chat_id} до {run_datetime_str}")
 
-# Восстановление задач из базы данных
 async def restore_reminders():
     """Восстановление задач из базы данных в планировщик"""
     conn = sqlite3.connect('reminders.db')
@@ -124,6 +126,7 @@ def validate_datetime_format(datetime_str):
 def get_command_keyboard():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
+            [KeyboardButton(text="/start")],
             [KeyboardButton(text="Добавить напоминание")],
             [KeyboardButton(text="Удалить напоминание")],
             [KeyboardButton(text="Список напоминаний")],
@@ -141,10 +144,18 @@ class ReminderStates(StatesGroup):
     WAITING_FOR_REMINDER_ID = State()  # Ожидание номера напоминания для удаления
     CONFIRM_DELETE = State()  # Ожидание подтверждения удаления
 
-# Обработчик кнопки "/start"
-@dp.message(lambda message: message.text == "/start")
-async def start(message: types.Message):
-    """Обработчик кнопки 'Начать'"""
+# Обработчик команды /start
+@dp.message(Command("start"))
+async def start(message: types.Message, state: FSMContext):
+    """Обработчик команды /start"""
+    current_state = await state.get_state()
+    if current_state == ReminderStates.WAITING_FOR_DATETIME.state:
+        # Если пользователь в состоянии WAITING_FOR_DATETIME, игнорируем команду
+        await message.reply(
+            "Вы ввели команду вместо даты и времени. Пожалуйста, введите дату и время в формате YYYY-MM-DD HH:MM или просто время в формате HH:MM."
+        )
+        return
+    # Обычная обработка команды /start
     await message.reply(
         'Привет! Я бот-напоминание. Чтобы добавить напоминание, используйте кнопку '
         '"Добавить напоминание".\n\n'
@@ -152,33 +163,52 @@ async def start(message: types.Message):
         reply_markup=get_command_keyboard()
     )
 
-# Обработчик кнопки "Добавить напоминание"
-@dp.message(lambda message: message.text == "Добавить напоминание")
-async def remind(message: types.Message, state: FSMContext):
-    logger.info("Обработчик 'Добавить напоминание' вызван")
-    await message.reply("Введите текст напоминания:")
-    await state.set_state(ReminderStates.WAITING_FOR_TEXT)
-
 @dp.message(ReminderStates.WAITING_FOR_TEXT)
 async def process_text(message: types.Message, state: FSMContext):
-    logger.info("Обработчик 'WAITING_FOR_TEXT' вызван")
-    await state.update_data(text=message.text)
+    """Обработка текста напоминания"""
+    logger.info("Обработчик состояния WAITING_FOR_TEXT вызван")
+    logger.info(f"Текущее состояние: {await state.get_state()}")
+    text = message.text.strip()  # Получаем текст от пользователя
+    logger.info(f"Пользователь ввел текст: {text}")
+
+    # Сохраняем текст как есть, даже если это команда
+    await state.update_data(text=text)  # Сохраняем текст в состоянии
+    logger.info(f"Текст сохранен в состоянии: {text}")
+
     await message.reply("Теперь введите дату и время в формате YYYY-MM-DD HH:MM или просто время в формате HH:MM:")
-    await state.set_state(ReminderStates.WAITING_FOR_DATETIME)
+    await state.set_state(ReminderStates.WAITING_FOR_DATETIME)  # Переходим к следующему состоянию
+    logger.info(f"Установлено состояние: {await state.get_state()}")
+
+# Обработчик кнопки "Добавить напоминание"
+@dp.message(F.text == "Добавить напоминание")
+async def remind(message: types.Message, state: FSMContext):
+    """Обработчик кнопки 'Добавить напоминание'"""
+    current_state = await state.get_state()
+    if current_state == ReminderStates.WAITING_FOR_DATETIME.state:
+        # Если пользователь в состоянии WAITING_FOR_DATETIME, игнорируем команду
+        await message.reply(
+            "Вы ввели команду вместо даты и времени. Пожалуйста, введите дату и время в формате YYYY-MM-DD HH:MM или просто время в формате HH:MM."
+        )
+        return
+    # Обычная обработка кнопки "Добавить напоминание"
+    await message.reply("Введите текст напоминания:")
+    await state.set_state(ReminderStates.WAITING_FOR_TEXT)
 
 # Обработчик состояния WAITING_FOR_DATETIME
 @dp.message(ReminderStates.WAITING_FOR_DATETIME)
 async def process_datetime(message: types.Message, state: FSMContext):
     """Обработка даты и времени"""
+    logger.info("Обработчик состояния WAITING_FOR_DATETIME вызван")
     user_data = await state.get_data()  # Получаем сохраненный текст
     text = user_data.get("text")
+    logger.info(f"Текст напоминания из состояния: {text}")
 
     input_text = message.text.strip()
 
     # Проверка формата даты и времени (YYYY-MM-DD HH:MM)
-    datetime_match = re.search(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$', input_text)
+    datetime_match = DATETIME_FORMAT_REGEX.match(input_text)
     # Проверка формата времени (HH:MM)
-    time_match = re.search(r'^\d{2}:\d{2}$', input_text)
+    time_match = TIME_FORMAT_REGEX.match(input_text)
 
     if datetime_match:
         # Если введена дата и время
@@ -197,9 +227,9 @@ async def process_datetime(message: types.Message, state: FSMContext):
             await message.reply("Некорректное время. Пожалуйста, введите время в формате HH:MM.")
             return
     else:
-        # Если формат не соответствует ни одному из допустимых
+        # Если введен текст, который не соответствует ни одному из допустимых форматов
         await message.reply(
-            "Формат даты и времени указан неверно. Пожалуйста, используйте формат YYYY-MM-DD HH:MM или HH:MM."
+            "Вы ввели текст вместо даты и времени. Пожалуйста, используйте формат YYYY-MM-DD HH:MM или HH:MM."
         )
         return
 
@@ -219,15 +249,18 @@ async def process_datetime(message: types.Message, state: FSMContext):
     add_reminder_to_db(message.chat.id, text, run_datetime)
     logger.info(f'Задача добавлена в планировщик: {run_datetime.strftime("%Y-%m-%d %H:%M")}')
     logger.info(f'Установлено новое напоминание: {text} в {run_datetime.strftime("%Y-%m-%d %H:%M")}')
-    await message.reply(
-        f'Напоминание установлено: {text} в {run_datetime.astimezone(TZ).strftime("%Y-%m-%d %H:%M")}',
-        reply_markup=get_command_keyboard())
+    await message.reply(f"Напоминание установлено на {run_datetime.strftime('%Y-%m-%d %H:%M')}.")
     await state.clear()  # Завершаем процесс
 
 # Обработчик кнопки "Удалить напоминание"
 @dp.message(lambda message: message.text == "Удалить напоминание")
 async def cancel_reminder(message: types.Message, state: FSMContext):
     """Обработчик кнопки 'Удалить напоминание'"""
+    current_state = await state.get_state()
+    if current_state in [ReminderStates.WAITING_FOR_TEXT, ReminderStates.WAITING_FOR_DATETIME]:
+        # Если пользователь находится в состоянии добавления напоминания, игнорируем команду
+        return
+
     reminders = get_reminders_from_db(message.chat.id)
     if not reminders:
         await message.reply("У вас нет активных напоминаний.", reply_markup=get_command_keyboard())
@@ -243,10 +276,14 @@ async def cancel_reminder(message: types.Message, state: FSMContext):
 
 # Обработчик кнопки "Список напоминаний"
 @dp.message(lambda message: message.text == "Список напоминаний")
-async def list_reminders(message: types.Message):
+async def list_reminders(message: types.Message, state: FSMContext):
     """Обработчик кнопки 'Список напоминаний'"""
-    chat_id = message.chat.id
+    current_state = await state.get_state()
+    if current_state in [ReminderStates.WAITING_FOR_TEXT, ReminderStates.WAITING_FOR_DATETIME]:
+        # Если пользователь находится в состоянии добавления напоминания, игнорируем команду
+        return
 
+    chat_id = message.chat.id
     reminders = get_reminders_from_db(chat_id)
 
     if reminders:
@@ -259,38 +296,41 @@ async def list_reminders(message: types.Message):
 
     await message.reply(reply_text, reply_markup=get_command_keyboard())
 
-# Обработчик кнопки "Команды"
-@dp.message(lambda message: message.text == "Команды")
-async def help_command(message: types.Message):
-    """Обработчик кнопки 'Команды'"""
-    help_text = (
-        "Я бот-напоминание. Вот список доступных действий:\n"
-        "1. Добавить напоминание - установить новое напоминание.\n"
-        "2. Удалить напоминание - удалить существующее напоминание.\n"
-        "3. Список напоминаний - показать все активные напоминания.\n"
-        "4. Команды - получить эту справку."
-    )
-    await message.reply(help_text, reply_markup=get_command_keyboard())
+
 
 # Обработчик ввода номера напоминания для удаления
 @dp.message(ReminderStates.WAITING_FOR_REMINDER_ID)
 async def process_reminder_id(message: types.Message, state: FSMContext):
     """Обработка номера напоминания для удаления"""
-    try:
-        index = int(message.text.strip())
-        reminders = get_reminders_from_db(message.chat.id)
-        if 1 <= index <= len(reminders):
-            reminder_id = reminders[index - 1][0]
-            await state.update_data(reminder_id=reminder_id)  # Сохраняем ID напоминания
-            await message.reply(
-                f"Вы уверены, что хотите удалить напоминание под номером {index}? (да/нет)",
-                reply_markup=get_command_keyboard()
-            )
-            await state.set_state(ReminderStates.CONFIRM_DELETE)
-        else:
-            await message.reply("Неверный номер напоминания. Пожалуйста, попробуйте снова.", reply_markup=get_command_keyboard())
-    except ValueError:
-        await message.reply("Пожалуйста, введите число.", reply_markup=get_command_keyboard())
+    input_text = message.text.strip()
+
+    # Если введен текст (включая команды, начинающиеся с "/")
+    if not input_text.isdigit():
+        await message.reply(
+            "❌ Вы ввели текст или команду вместо номера напоминания.\n"
+            "Пожалуйста, введите **номер напоминания** из списка.",
+            reply_markup=get_command_keyboard()
+        )
+        return  # Остаемся в состоянии WAITING_FOR_REMINDER_ID
+
+    # Преобразуем ввод в число
+    index = int(input_text)
+    reminders = get_reminders_from_db(message.chat.id)
+
+    # Проверка, что номер напоминания в допустимом диапазоне
+    if 1 <= index <= len(reminders):
+        reminder_id = reminders[index - 1][0]
+        await state.update_data(reminder_id=reminder_id)  # Сохраняем ID напоминания
+        await message.reply(
+            f"❓ Вы уверены, что хотите удалить напоминание под номером {index}? (да/нет)",
+            reply_markup=get_command_keyboard()
+        )
+        await state.set_state(ReminderStates.CONFIRM_DELETE)
+    else:
+        await message.reply(
+            "❌ Неверный номер напоминания. Пожалуйста, введите номер из списка.",
+            reply_markup=get_command_keyboard()
+        )
 
 # Обработчик подтверждения удаления
 @dp.message(ReminderStates.CONFIRM_DELETE)
@@ -318,7 +358,7 @@ async def main():
     # Инициализация базы данных
     init_db()
 
-    # Восстановление задач из базы данных
+    # Восстановление напоминаний из базы данных
     await restore_reminders()
 
     # Запуск планировщика
