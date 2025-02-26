@@ -4,12 +4,12 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 import re
 import sqlite3
 import asyncio
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 # Настройка логгирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -166,45 +166,63 @@ async def process_text(message: types.Message, state: FSMContext):
     await message.reply("Теперь введите дату и время в формате YYYY-MM-DD HH:MM или просто время в формате HH:MM:")
     await state.set_state(ReminderStates.WAITING_FOR_DATETIME)
 
+# Обработчик состояния WAITING_FOR_DATETIME
 @dp.message(ReminderStates.WAITING_FOR_DATETIME)
 async def process_datetime(message: types.Message, state: FSMContext):
-    logger.info("Обработчик 'WAITING_FOR_DATETIME' вызван")
-    user_data = await state.get_data()
+    """Обработка даты и времени"""
+    user_data = await state.get_data()  # Получаем сохраненный текст
     text = user_data.get("text")
 
     input_text = message.text.strip()
-    datetime_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2})$', input_text)
-    time_match = re.search(r'(\d{2}:\d{2})$', input_text)
+
+    # Проверка формата даты и времени (YYYY-MM-DD HH:MM)
+    datetime_match = re.search(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$', input_text)
+    # Проверка формата времени (HH:MM)
+    time_match = re.search(r'^\d{2}:\d{2}$', input_text)
 
     if datetime_match:
-        datetime_str = datetime_match.group(1)
-        run_datetime = TZ.localize(datetime.strptime(datetime_str, '%Y-%m-%d %H:%M'))
+        # Если введена дата и время
+        try:
+            run_datetime = TZ.localize(datetime.strptime(input_text, '%Y-%m-%d %H:%M'))
+        except ValueError:
+            await message.reply("Некорректная дата или время. Пожалуйста, введите дату и время в формате YYYY-MM-DD HH:MM.")
+            return
     elif time_match:
-        time_str = time_match.group(1)
-        now = datetime.now(TZ)
-        time_part = datetime.strptime(time_str, '%H:%M').time()
-        run_datetime = TZ.localize(datetime.combine(now.date(), time_part))
+        # Если введено только время
+        try:
+            now = datetime.now(TZ)
+            time_part = datetime.strptime(input_text, '%H:%M').time()
+            run_datetime = TZ.localize(datetime.combine(now.date(), time_part))
+        except ValueError:
+            await message.reply("Некорректное время. Пожалуйста, введите время в формате HH:MM.")
+            return
     else:
-        await message.reply("Формат даты и времени указан неверно. Пожалуйста, используйте формат YYYY-MM-DD HH:MM или HH:MM.")
+        # Если формат не соответствует ни одному из допустимых
+        await message.reply(
+            "Формат даты и времени указан неверно. Пожалуйста, используйте формат YYYY-MM-DD HH:MM или HH:MM."
+        )
         return
 
+    # Проверка, что указанная дата и время в будущем
     if run_datetime <= datetime.now(TZ):
         await message.reply("Указанная дата и время уже прошли. Пожалуйста, укажите будущую дату и время.")
         return
 
+    # Добавляем задачу в планировщик
     scheduler.add_job(
         send_reminder,
         trigger="date",
         run_date=run_datetime,
         args=(bot, message.chat.id, text),
     )
+    # Добавляем напоминание в базу данных
     add_reminder_to_db(message.chat.id, text, run_datetime)
     logger.info(f'Задача добавлена в планировщик: {run_datetime.strftime("%Y-%m-%d %H:%M")}')
     logger.info(f'Установлено новое напоминание: {text} в {run_datetime.strftime("%Y-%m-%d %H:%M")}')
     await message.reply(
         f'Напоминание установлено: {text} в {run_datetime.astimezone(TZ).strftime("%Y-%m-%d %H:%M")}',
         reply_markup=get_command_keyboard())
-    await state.clear()
+    await state.clear()  # Завершаем процесс
 
 # Обработчик кнопки "Удалить напоминание"
 @dp.message(lambda message: message.text == "Удалить напоминание")
